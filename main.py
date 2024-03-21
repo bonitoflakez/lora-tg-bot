@@ -6,14 +6,15 @@ import subprocess
 import requests
 import json
 import logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-#Running Your Telegram Bot Script:
 import telebot
 import requests
-# Other import statements...
+import time
+
+# additional imports
 from dotenv import load_dotenv
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 API_TOKEN = os.getenv('API_TOKEN')
 STRIPE_API_KEY = os.getenv('STRIPE_API_KEY')
@@ -22,7 +23,11 @@ FLASK_WRAPPER_URL = os.getenv('FLASK_WRAPPER_URL')
 bot = telebot.TeleBot(API_TOKEN)
 stripe.api_key = STRIPE_API_KEY
 
-# Handling the /start command
+# comfyUI prompt endpoint
+PROMPT_URL = os.getenv('PROMPT_URL')
+COMFY_OUTPUT_DIR = os.getenv('COMFY_OUTPUT_DIR')
+
+# start command
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     welcome_text = ("Welcome to Mira AI!\n\n"
@@ -71,52 +76,73 @@ def handle_payments(message):
         "1 min = 1 Credit (☎️)",
         reply_markup=markup
     )
+
+# image command
 @bot.message_handler(commands=['image'])
 def request_image_prompt(message):
     msg = bot.send_message(message.chat.id, "Please send me a prompt for the image.")
     bot.register_next_step_handler(msg, generate_and_send_image)
 
+# generate image
 def generate_and_send_image(message):
     prompt = message.text
-    image_data = generate_image_with_fooocus(prompt)
-    
-    if image_data:
-        # Assuming the API returns a direct URL to the generated image
-        # You might need to adjust this if your API returns base64-encoded image data
-        image_url = image_data.get("url")  # Adjust according to your API response structure
-        bot.send_photo(message.chat.id, photo=image_url)
-    else:
-        bot.send_message(message.chat.id, "Sorry, I couldn't generate an image right now.")
-        
-def generate_image_with_fooocus(prompt):
-    response = requests.post(FLASK_WRAPPER_URL, json={"prompt": prompt}, headers={'Content-Type': 'application/json'})
-    if response.status_code == 200:
-        response_json = response.json()
-        # Assuming the API returns the path or filename in a key 'image_filename'
-        image_filename = response_json.get('image_path')  # Adjust 'image_path' to match the key from your API response
-        return image_filename
-    else:
-        logging.error(f"Fooocus API request failed with status code {response.status_code}")
-        return None
+    image_path = generate_image(prompt)
 
-def generate_and_send_image(message):
-    prompt = message.text
-    image_filename = generate_image_with_fooocus(prompt)
-    if image_filename:
-        # Assuming images are saved in a specific directory; adjust the path as needed.
-        image_path = f"/full/path/to/images/{image_filename}"  # Adjust this path to where Fooocus saves images
+    if image_path:
         try:
             with open(image_path, 'rb') as image_file:
                 bot.send_photo(message.chat.id, photo=image_file)
         except FileNotFoundError:
-            bot.send_message(message.chat.id, "The image was not found.")
+            bot.send_message(message.chat.id, "Couldn't find image")
         except Exception as e:
-            bot.send_message(message.chat.id, f"An error occurred: {str(e)}")
+            bot.send.message(message.chat.id, f"An error occurred: {str(e)}")
     else:
         bot.send_message(message.chat.id, "Sorry, I couldn't generate an image right now.")
 
+
+# get latest image
+def get_latest_image(folder):
+	files = os.listdir(folder)
+	image_files = [f for f in files if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+	image_files.sort(key=lambda x: os.path.getmtime(os.path.join(folder, x)))
+	latest_image = os.path.join(folder, image_files[-1] if image_files else None)
+	return latest_image
+
+# start queue
+def start_queue(prompt_workflow):
+	p = {"prompt": prompt_workflow}
+	queue_data = json.dumps(p).encode('utf-8')
+	requests.post(PROMPT_URL, data=queue_data)
+
+# generate image using workflow
+def generate_image(user_prompt):
+    with open("utils/workflow.json", "r") as workflow_config:
+        workflow_prompt = json.load(workflow_config)
+
+    # Generate a unique seed for each image generation
+    unique_seed = int(time.time() * 1000) # Using current timestamp in milliseconds
+
+    # Modify the workflow_prompt to include the unique_seed
+    workflow_prompt['3']['inputs']['seed'] = unique_seed
+
+    final_prompt = "miranowhere (green eyes) (a woman) " + user_prompt
+
+    # add custom user prompt
+    workflow_prompt['6']['inputs']['text'] = final_prompt
+
+    # check for any previously generated image
+    prev_image = get_latest_image(COMFY_OUTPUT_DIR)
+
+    start_queue(workflow_prompt)
+
+    while True:
+        latest_image = get_latest_image(COMFY_OUTPUT_DIR)
+        if latest_image != prev_image:
+            return latest_image
+
+        time.sleep(1)
     
-    # Add this near your other command handlers
+# call command
 @bot.message_handler(commands=['call'])
 def start_call_process(message):
     markup = types.ReplyKeyboardMarkup(one_time_keyboard=True)
@@ -145,4 +171,5 @@ def process_phone_number(message):
 
 
 if __name__ == '__main__':
+    print("Bot started...")
     bot.infinity_polling()
